@@ -664,6 +664,53 @@ function inlineAtoms(text, links, inLink, rawBlock) {
   let inRaw = rawBlock;
   const n = text.length;
   let i = 0;
+  // Ranges [start, end) of failed inline-link labels in this text:
+  // a [...](...) that looked like a link but was rejected suppresses
+  // emphasis inside its label (marked treats the whole attempt as
+  // literal text, with code spans still parsed but no em/strong).
+  const failedLabels = [];
+  // Find the label range of a failed inline link starting at `[` (i):
+  // the first ] (skipping code spans) followed by a closed (...) group.
+  const findFailedLabel = (start) => {
+    let j = start + 1;
+    while (j < n) {
+      const c = text.charCodeAt(j);
+      if (c === 96) { // backtick: skip the code span
+        let k = j;
+        while (k < n && text.charCodeAt(k) === 96) k++;
+        const run = k - j;
+        let close = -1;
+        let p = k;
+        while (p < n) {
+          if (text.charCodeAt(p) === 96) {
+            let q = p;
+            while (q < n && text.charCodeAt(q) === 96) q++;
+            if (q - p === run) { close = q; break; }
+            p = q;
+          } else p++;
+        }
+        if (close === -1) return null;
+        j = close;
+        continue;
+      }
+      if (c === 93) { // ]
+        if (text.charCodeAt(j + 1) === 40) { // (
+          let depth = 0, p = j + 1;
+          while (p < n) {
+            const pc = text.charCodeAt(p);
+            if (pc === 40) depth++;
+            else if (pc === 41) { depth--; if (depth === 0) return [start + 1, j]; }
+            p++;
+          }
+          return null;
+        }
+        // The first ] is not followed by (: not an inline-link attempt.
+        return null;
+      }
+      j++;
+    }
+    return null;
+  };
   while (i < n) {
     const ch = text[i];
     const code = text.charCodeAt(i);
@@ -730,6 +777,16 @@ function inlineAtoms(text, links, inLink, rawBlock) {
       let j = i;
       while (j < n && text.charCodeAt(j) === code) j++;
       const run = j - i;
+      // Inside a failed link label, delimiter runs are literal text.
+      let inFailed = false;
+      for (let f = 0; f < failedLabels.length; f++) {
+        if (i >= failedLabels[f][0] && i < failedLabels[f][1]) { inFailed = true; break; }
+      }
+      if (inFailed) {
+        textBuf += text.slice(i, j);
+        i = j;
+        continue;
+      }
       const before = i > 0 ? text[i - 1] : undefined;
       const after = j < n ? text[j] : undefined;
       const beforeSpace = before === undefined || isSpaceCh(before);
@@ -808,9 +865,15 @@ function inlineAtoms(text, links, inLink, rawBlock) {
     // Links and images. A link may not contain another link, but it may
     // contain an image.
     if (code === 91 || (code === 33 && text.charCodeAt(i + 1) === 91)) { // [ or ![
+      // Did the inline-link regex match at all? A match rejected by a
+      // semantic check (nested link, resolved ref) still leaves emphasis
+      // in the label alone; only a label the regex never matched
+      // suppresses it.
+      let linkMatched = false;
       if (!inLink || code === 33) {
         const rest = text.slice(i);
         let lm = RE_LINK.exec(rest);
+        linkMatched = !!lm;
         // A ] inside an HTML tag does not close the label: not a link.
         if (lm) {
           const openLen = rest.charCodeAt(0) === 33 ? 2 : 1;
@@ -915,6 +978,12 @@ function inlineAtoms(text, links, inLink, rawBlock) {
             continue;
           }
         }
+      }
+      // No link form matched: a [...](...) whose label the inline-link
+      // regex never matched suppresses emphasis inside its label.
+      if (code === 91 && !linkMatched) {
+        const fl = findFailedLabel(i);
+        if (fl) failedLabels.push(fl);
       }
       textBuf += ch;
       i++;
