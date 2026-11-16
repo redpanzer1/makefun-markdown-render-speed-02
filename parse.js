@@ -2058,7 +2058,10 @@ function matchList(src, i, links) {
       let itemSawBlank = false;
       j = le + 1;
       // Continuation lines.
-      let paraOpen = !isBlankLineStr(firstContent) && !interruptAt(firstContent, 0);
+      // A paragraph is open when the item's content ends in one — also
+      // when it ends inside a nested blockquote or list, so a lazy line
+      // can continue it (paraOpenAfter returns true for those).
+      let paraOpen = paraOpenAfter(firstContent, false);
       while (j < n) {
         const le2 = lineEnd(src, j);
         const line2 = src.slice(j, le2);
