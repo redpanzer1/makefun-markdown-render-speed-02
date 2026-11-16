@@ -1826,11 +1826,12 @@ function matchHtmlBlock(src, i, isInner) {
   const kind = start.kind;
   // For kinds 2-5 the raw text runs to the end of the line holding the
   // closing delimiter, including its newline — unless the next line is
-  // blank, in which case the newline is dropped.
+  // empty (zero characters), in which case the newline is dropped. A
+  // whitespace-only line does not drop it.
   const endOfCloseLine = (idx) => {
     const le = lineEnd(src, idx);
     const nl = le + 1;
-    if (nl < n && isBlankLine(src, nl, lineEnd(src, nl))) {
+    if (nl < n && lineEnd(src, nl) === nl) {
       return { text: src.slice(i, le), next: nl };
     }
     return { text: src.slice(i, le < n ? le + 1 : le), next: le < n ? le + 1 : le };
