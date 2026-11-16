@@ -1364,15 +1364,18 @@ function matchFences(src, i) {
   }
   const contentStart = end + 1 <= n ? end + 1 : n;
   let text, next;
+  // Only backtick fences strip the opening fence's indent from the
+  // content; tilde fences keep the content lines verbatim.
+  const stripIndent = fenceCh === 96 ? fenceIndent : 0;
   if (closeStart !== -1) {
-    text = stripFenceIndent(src, contentStart, closeStart, fenceIndent);
+    text = stripFenceIndent(src, contentStart, closeStart, stripIndent);
     // The newline immediately before the closing fence is not part of
     // the code; the text still ends with exactly one newline.
     if (text.endsWith('\n')) text = text.slice(0, -1);
     if (text.length > 0 && !text.endsWith('\n')) text += '\n';
     next = lineEnd(src, closeStart) + 1;
   } else {
-    text = stripFenceIndent(src, contentStart, n, fenceIndent);
+    text = stripFenceIndent(src, contentStart, n, stripIndent);
     next = n;
     // The code text always ends with a newline (even when the fence is
     // unclosed and the input ends without one).
