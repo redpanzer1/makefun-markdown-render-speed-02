@@ -943,12 +943,27 @@ function inlineAtoms(text, links, inLink, rawBlock) {
       const localRaw = text.slice(ls, i);
       if (localRaw.length > 0) {
         const after = text.slice(i + 1);
-        const dm = /^[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)+/.exec(after);
+        const dm = /^[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9_-]*[A-Za-z0-9])?)+/.exec(after);
         if (dm) {
-          // A domain followed at once by - or _ is not an email at all
-          // (the label would continue and end invalidly).
+          // A domain followed at once by - is not an email. A domain
+          // followed by _ is not an email either, UNLESS that _ is the
+          // closing delimiter of an em/strong whose opener sits before
+          // the local part (e.g. __...foo@bar.baz__).
           const afterDomain = text[i + 1 + dm[0].length];
-          if (afterDomain !== '-' && afterDomain !== '_') {
+          let emailOk = true;
+          if (afterDomain === '-' || afterDomain === '_') {
+            emailOk = false;
+            if (afterDomain === '_') {
+              let u = ls - 1;
+              while (u >= 0 && text[u] !== '_') u--;
+              if (u >= 0) {
+                let hasAnother = false;
+                for (let k = u + 1; k < ls; k++) if (text[k] === '_') { hasAnother = true; break; }
+                if (!hasAnother) emailOk = true;
+              }
+            }
+          }
+          if (emailOk) {
             // A mailto: or xmpp: prefix immediately before the local
             // part (at a word boundary) belongs to the autolink. An
             // xmpp: link also takes one path segment after the domain.
