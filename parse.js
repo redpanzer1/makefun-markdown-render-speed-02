@@ -1826,7 +1826,9 @@ function matchHtmlBlock(src, i, isInner) {
     while (j < n) {
       const le = lineEnd(src, j);
       if (closeRe.test(src.slice(j, le))) {
-        return { text: src.slice(i, le + 1 <= n ? le + 1 : le), next: le + 1 };
+        // Like kinds 2-5: the newline is dropped when a blank line
+        // follows the closing line.
+        return endOfCloseLine(j);
       }
       j = le + 1;
     }
