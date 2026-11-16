@@ -981,6 +981,10 @@ function resolveDelimiters(atoms) {
   const delims = [];
   for (let p = head; p; p = p.next) if (p.t === 6) delims.push(p);
   if (delims.length === 0) return head;
+  // Barriers: a strong formed from an open-only opener and a both-open-
+  // close closer (both runs exactly 2) blocks an earlier opener of the
+  // same char from matching a later closer of length 1 or 2.
+  const barriers = [];
 
   const removeNode = (node) => {
     if (node.prev) node.prev.next = node.next; else head = node.next;
@@ -1001,9 +1005,18 @@ function resolveDelimiters(atoms) {
     // that can open, subject to the odd/even rule for * and _.
     while (closer.len > 0 && closer.close) {
       let opener = null;
+      // The latest barrier for this char before this closer (if any).
+      let barrierIdx = -1;
+      if (closer.len < 3) {
+        for (let b = 0; b < barriers.length; b++) {
+          if (barriers[b].ch === closer.ch && barriers[b].idx < di && barriers[b].idx > barrierIdx) barrierIdx = barriers[b].idx;
+        }
+      }
       for (let oi = di - 1; oi >= 0; oi--) {
         const cand = delims[oi];
         if (!cand || cand.t !== 6 || cand.len === 0 || cand.ch !== closer.ch || !cand.open) continue;
+        // An opener before the barrier cannot match this closer.
+        if (barrierIdx >= 0 && oi < barrierIdx) continue;
         // Skip a delimiter already swallowed into a wrapper (orphaned).
         if (cand.prev === null && cand.next === null && head !== cand) continue;
         if (cand.ch === '~') { // ~ requires equal lengths, and only 1 or 2
@@ -1025,6 +1038,11 @@ function resolveDelimiters(atoms) {
       if (opener.ch === '~') use = opener.len; // equal by the check above
       else use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
       const kind = opener.ch === '~' ? 9 : (use === 2 ? 8 : 7);
+      // A strong from an open-only opener (len 2) and a both-open-close
+      // closer (len 2) raises a barrier for this char at this closer.
+      if (kind === 8 && opener.len === 2 && closer.len === 2 && !opener.close && closer.open && closer.close) {
+        barriers.push({ ch: opener.ch, idx: di });
+      }
       // Gather the kids between opener and closer.
       const kids = [];
       for (let p = opener.next; p && p !== closer; p = p.next) kids.push(p);
