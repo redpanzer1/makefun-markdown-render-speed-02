@@ -395,9 +395,9 @@ const TITLE_SRC = '"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|\\((?:\\\\.|[^
 const RE_LINK = new RegExp('^!?\\[(' + LABEL_SRC + ')\\]\\([ \\t\\r\\n]*(' + HREF_SRC + ')(?:[ \\t\\r\\n]+(' + TITLE_SRC + '))?[ \\t\\r\\n]*\\)');
 const RE_REFLINK = new RegExp('^!?\\[(' + LABEL_SRC + ')\\]\\[(' + LABEL_SRC + ')\\]');
 const RE_NOLINK = /^!?\[((?:\[[^\[\]]*\]|\\[\[\]]|[^\[\]])*)\]/;
-const RE_AUTOLINK = /^<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^ <>]*|[^ <>]+@[^ <>]+)>/;
+const RE_AUTOLINK = /^<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^ <>]*|[^ <>\\]+@[^ <>\\]+)>/;
 const RE_TAG = new RegExp(
-  '^<!--' + '[\\s\\S]*?' + '-->' + '|' +
+  '^<!-->' + '|' + '^<!--->' + '|' + '^<!--' + '[\\s\\S]*?' + '-->' + '|' +
   '^<[a-zA-Z][\\w-]*(?:\\s+[a-zA-Z_:][\\w.:-]*(?:\\s*=\\s*(?:"[^"]*"|\'[^\']*\'|[^\\s"\'=<>`]+))?)*\\s*/?>' + '|' +
   '^</[a-zA-Z][\\w-]*\\s*>' + '|' +
   '^<\\?[\\s\\S]*?\\?>' + '|' +
@@ -538,6 +538,8 @@ function inlineAtoms(text, links, inLink, rawBlock) {
         flushText();
         atoms.push({ t: 3 });
         i += 2;
+        // A hard break strips all leading spaces/tabs of the next line.
+        while (i < n && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9)) i++;
         continue;
       }
       if (nx !== undefined && isAsciiPunct(nx)) {
@@ -625,6 +627,8 @@ function inlineAtoms(text, links, inLink, rawBlock) {
           flushText();
           atoms.push({ t: 3 });
           i = j + 1;
+          // A hard break strips all leading spaces/tabs of the next line.
+          while (i < n && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9)) i++;
           continue;
         }
       }
@@ -1090,7 +1094,9 @@ function htmlBlockStart(src, i, end) {
     if (BLOCK_TAGS.has(name)) return { kind: 6, tag: name };
     // Kind 7 (any other tag) needs the tag closed on this line and
     // nothing but whitespace after it; otherwise it is a paragraph.
-    const m7 = /^<\/?[A-Za-z][\w-]*[^>]*>/.exec(rest);
+    // The tag itself must be well formed (proper attribute syntax);
+    // a malformed tag such as <a h*#ref="hi"> is not an HTML block.
+    const m7 = /^(?:<[a-zA-Z][\w-]*(?:\s+[a-zA-Z_:][\w.:-]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*\s*\/?>|<\/[a-zA-Z][\w-]*\s*>)/.exec(rest);
     if (m7 && /^[ \t]*$/.test(rest.slice(m7[0].length))) return { kind: 7, tag: name };
     return null;
   }
@@ -1616,6 +1622,12 @@ function matchHtmlBlock(src, i, isInner) {
     return { text: src.slice(i, le < n ? le + 1 : le), next: le < n ? le + 1 : le };
   };
   if (kind === 2) { // comment, ends at -->
+    // An empty comment <!--> or <!---> ends at once; the rest of the
+    // line is a separate block.
+    let k = i;
+    while (k < n && src.charCodeAt(k) === 32) k++;
+    if (src.startsWith('<!-->', k)) return { text: src.slice(i, k + 5), next: k + 5 };
+    if (src.startsWith('<!--->', k)) return { text: src.slice(i, k + 6), next: k + 6 };
     const idx = src.indexOf('-->', i);
     if (idx === -1) return { text: src.slice(i), next: n };
     return endOfCloseLine(idx);
