@@ -1030,23 +1030,31 @@ function resolveDelimiters(atoms) {
 
   for (let di = 0; di < delims.length; di++) {
     const closer = delims[di];
-    if (!closer || closer.t !== 6 || closer.len === 0 || !closer.close) continue;
+    if (!closer || closer.t !== 6 || closer.len === 0 || !closer.close || closer.blocked) continue;
     // Find the matching opener: nearest preceding delimiter of the same char
     // that can open, subject to the odd/even rule for * and _.
     while (closer.len > 0 && closer.close) {
       let opener = null;
       // The latest barrier for this char before this closer (if any).
       let barrierIdx = -1;
-      if (closer.len < 3) {
-        for (let b = 0; b < barriers.length; b++) {
-          if (barriers[b].ch === closer.ch && barriers[b].idx < di && barriers[b].idx > barrierIdx) barrierIdx = barriers[b].idx;
+      let barrierKind = '';
+      for (let b = 0; b < barriers.length; b++) {
+        if (barriers[b].ch === closer.ch && barriers[b].idx < di && barriers[b].idx > barrierIdx) {
+          barrierIdx = barriers[b].idx;
+          barrierKind = barriers[b].kind;
         }
       }
       for (let oi = di - 1; oi >= 0; oi--) {
         const cand = delims[oi];
         if (!cand || cand.t !== 6 || cand.len === 0 || cand.ch !== closer.ch || !cand.open) continue;
-        // An opener before the barrier cannot match this closer.
-        if (barrierIdx >= 0 && oi < barrierIdx) continue;
+        // An opener before the barrier cannot match this closer:
+        // a strong barrier blocks a single closer outright and a
+        // double closer from a shorter opener; an em barrier blocks
+        // only an opener longer than the closer.
+        if (barrierIdx >= 0 && oi < barrierIdx) {
+          if (barrierKind === 'strong' && (closer.len === 1 || cand.len < closer.len)) continue;
+          if (barrierKind === 'em' && cand.len > closer.len) continue;
+        }
         // Skip a delimiter already swallowed into a wrapper (orphaned).
         if (cand.prev === null && cand.next === null && head !== cand) continue;
         if (cand.ch === '~') { // ~ requires equal lengths, and only 1 or 2
@@ -1063,15 +1071,27 @@ function resolveDelimiters(atoms) {
         opener = cand;
         break;
       }
-      if (!opener) break;
+      if (!opener) {
+        // No opener: if a barrier stood before this closer, the block
+        // persists into nested resolution (the kids of a wrapper are
+        // re-resolved), so mark it and never let it close there.
+        if (barrierIdx >= 0) closer.blocked = true;
+        break;
+      }
       let use;
       if (opener.ch === '~') use = opener.len; // equal by the check above
       else use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
       const kind = opener.ch === '~' ? 9 : (use === 2 ? 8 : 7);
       // A strong from an open-only opener (len 2) and a both-open-close
-      // closer (len 2) raises a barrier for this char at this closer.
+      // closer (len 2) raises a strong barrier; an em whose closer can
+      // both open and close raises an em barrier. A strong barrier
+      // blocks a single closer outright and a double closer from a
+      // shorter opener; an em barrier blocks only an opener longer
+      // than the closer.
       if (kind === 8 && opener.len === 2 && closer.len === 2 && !opener.close && closer.open && closer.close) {
-        barriers.push({ ch: opener.ch, idx: di });
+        barriers.push({ ch: opener.ch, idx: di, kind: 'strong' });
+      } else if (kind === 7 && closer.open && closer.close) {
+        barriers.push({ ch: opener.ch, idx: di, kind: 'em' });
       }
       // Gather the kids between opener and closer.
       const kids = [];
