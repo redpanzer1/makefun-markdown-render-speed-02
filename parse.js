@@ -113,7 +113,7 @@ function labelPlainText(label, links) {
       }
     }
   };
-  walkList(resolveDelimiters(inlineAtoms(label, links, false, false)));
+  walkList(resolveDelimiters(inlineAtoms(label, links, false, false, true)));
   return out;
 }
 
@@ -149,6 +149,53 @@ function labelHasInlineLink(label) {
     i++;
   }
   return false;
+}
+
+// Does an inline link/image label poison later emphasis in the same
+// inline run (marked quirk)? True when the label's backtick runs, after
+// greedy code-span pairing (a run pairs with the next run of the same
+// length, swallowing the runs between as span content), leave a literal
+// run of length 1 AND (a literal run of length >= 2 or a code span).
+// Backslash escapes do not count as backticks.
+function labelPoisoned(label) {
+  const runs = [];
+  for (let i = 0; i < label.length;) {
+    const c = label.charCodeAt(i);
+    if (c === 92) { i += 2; continue; } // backslash escape
+    if (c === 96) {
+      let j = i;
+      while (j < label.length && label.charCodeAt(j) === 96) j++;
+      runs.push(j - i);
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  const used = new Array(runs.length).fill(false);
+  let hasCodespan = false;
+  const literal = [];
+  for (let a = 0; a < runs.length; a++) {
+    if (used[a]) continue;
+    let found = -1;
+    for (let b = a + 1; b < runs.length; b++) {
+      if (!used[b] && runs[b] === runs[a]) { found = b; break; }
+    }
+    if (found !== -1) {
+      hasCodespan = true;
+      used[a] = true;
+      used[found] = true;
+      for (let c = a + 1; c < found; c++) used[c] = true;
+    } else {
+      literal.push(runs[a]);
+      used[a] = true;
+    }
+  }
+  let has1 = false, hasGe2 = false;
+  for (const r of literal) {
+    if (r === 1) has1 = true;
+    else if (r >= 2) hasGe2 = true;
+  }
+  return has1 && (hasGe2 || hasCodespan);
 }
 
 // Is the label's closing ] (at closeIdx) inside an HTML tag? Scans the
@@ -454,7 +501,7 @@ const BT = String.fromCharCode(96);
 // when the link is created (a link may not contain a link; an image's
 // label may).
 const LABEL_SRC = '(?:\\[(?:\\[(?:\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|[^\\[\\]\\\\])*\\]|<\\/?[A-Za-z][^>]*>|\\\\.|' +
-  BT + '+[^' + BT + ']+' + BT + '+|' + BT + '{2,}(?=\\])' + '|[^\\[\\]\\\\' + BT + '])*?';;
+  BT + '+[^' + BT + ']+' + BT + '+(?!`)|' + BT + '{2,}(?=\\])' + '|[^\\[\\]\\\\' + BT + '])*?';;
 const HREF_SRC = '<(?:\\\\.|[^\\n<>\\\\])*>|(?!<)[^ \\t\\r\\n\\x00-\\x1f]*';
 const TITLE_SRC = '"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|\\((?:\\\\.|[^()\\\\])*\\)';
 
@@ -651,7 +698,9 @@ function matchSchemeUrl(text, i) {
 // Phase A: scan text into a flat atom list. `links` maps normalized labels
 // to { href, title }. `inLink` forbids nested links. `rawBlock` means the
 // text sits inside <pre>/<code>/<kbd>/<script>/<style>, so it is not escaped.
-function inlineAtoms(text, links, inLink, rawBlock) {
+// `isLabel` means this call tokenizes a link label or image alt text: it
+// must not touch document-level inline state (the <a> tag flag).
+function inlineAtoms(text, links, inLink, rawBlock, isLabel) {
   const atoms = [];
   let textBuf = '';
   const flushText = () => {
@@ -664,6 +713,15 @@ function inlineAtoms(text, links, inLink, rawBlock) {
   let inRaw = rawBlock;
   const n = text.length;
   let i = 0;
+  // Document-level flag (kept on the shared links map): an inline <a>
+  // tag seen anywhere earlier in the document suppresses GFM extended
+  // autolinks until a </a> tag appears. Only the main inline stream
+  // (not label recursion) updates it.
+  // Poison flag for this inline run: set when an inline link/image
+  // whose label is poisoned (labelPoisoned) is completed, and never
+  // cleared again in this run. While set, delimiter runs are marked
+  // poisoned (resolved in phase B).
+  let poisoned = false;
   // Ranges [start, end) of failed inline-link labels in this text:
   // a [...](...) that looked like a link but was rejected suppresses
   // emphasis inside its label (marked treats the whole attempt as
@@ -804,7 +862,7 @@ function inlineAtoms(text, links, inLink, rawBlock) {
         canClose = rightFlanking;
       }
       flushText();
-      atoms.push({ t: 6, ch, len: run, open: canOpen, close: canClose });
+      atoms.push({ t: 6, ch, len: run, open: canOpen, close: canClose, pz: poisoned });
       i = j;
       continue;
     }
@@ -852,6 +910,13 @@ function inlineAtoms(text, links, inLink, rawBlock) {
         flushText();
         const tag = tm[0];
         atoms.push({ t: 1, s: tag });
+        // An inline <a ...> tag (exactly "<a " + space) suppresses
+        // later GFM autolinks document-wide; a literal </a> clears it.
+        // Tags inside link labels / alt text do not touch this flag.
+        if (!isLabel) {
+          if (/^<a /i.test(tag)) links._tagInLink = true;
+          else if (/^<\/a>/i.test(tag)) links._tagInLink = false;
+        }
         if (!inRaw && /^<(pre|code|kbd|script|style)[\s/>]/i.test(tag)) inRaw = true;
         else if (inRaw && /^<\/(pre|code|kbd|script|style)\s*>/i.test(tag)) inRaw = false;
         i += tag.length;
@@ -919,9 +984,12 @@ function inlineAtoms(text, links, inLink, rawBlock) {
           if (isImg) {
             atoms.push({ t: 5, href, title, alt: labelPlainText(lm[1], links) });
           } else {
-            const kids = inlineAtoms(lm[1], links, true, inRaw);
+            const kids = inlineAtoms(lm[1], links, true, inRaw, true);
             atoms.push({ t: 4, href, title, kids });
           }
+          // A poisoned label arms the poison flag for later emphasis
+          // in this inline run (reference links do not poison).
+          if (labelPoisoned(lm[1])) poisoned = true;
           i += rawLen;
           continue;
         }
@@ -950,7 +1018,7 @@ function inlineAtoms(text, links, inLink, rawBlock) {
               if (isImg) {
                 atoms.push({ t: 5, href: def.href, title: def.title, alt: labelPlainText(rm[1], links) });
               } else {
-                const kids = inlineAtoms(rm[1], links, true, inRaw);
+                const kids = inlineAtoms(rm[1], links, true, inRaw, true);
                 atoms.push({ t: 4, href: def.href, title: def.title, kids });
               }
               i += rm[0].length;
@@ -971,7 +1039,7 @@ function inlineAtoms(text, links, inLink, rawBlock) {
             if (isImg) {
               atoms.push({ t: 5, href: def.href, title: def.title, alt: labelPlainText(nm[1], links) });
             } else {
-              const kids = inlineAtoms(nm[1], links, true, inRaw);
+              const kids = inlineAtoms(nm[1], links, true, inRaw, true);
               atoms.push({ t: 4, href: def.href, title: def.title, kids });
             }
             i += nm[0].length;
@@ -991,8 +1059,9 @@ function inlineAtoms(text, links, inLink, rawBlock) {
     }
 
     // GFM extended autolinks: www. / scheme:// (checked at their first char).
-    // Never inside a link's text.
-    if (!inLink && (code === 119 || code === 104 || code === 102 || code === 72 || code === 70)) {
+    // Never inside a link's text, and never after an inline <a> tag
+    // opened earlier in the document (links._tagInLink).
+    if (!inLink && !links._tagInLink && (code === 119 || code === 104 || code === 102 || code === 72 || code === 70)) {
       const hit = matchSchemeUrl(text, i);
       if (hit) {
         flushText();
@@ -1006,8 +1075,9 @@ function inlineAtoms(text, links, inLink, rawBlock) {
     }
     // An email address: the local part is found by scanning back over the
     // raw text, and it may span trailing text atoms and dead delimiter
-    // runs (e.g. the intraword _ in a.b-c_d@a.b). Never inside a link.
-    if (!inLink && code === 64) { // @
+    // runs (e.g. the intraword _ in a.b-c_d@a.b). Never inside a link,
+    // and never after an inline <a> tag (links._tagInLink).
+    if (!inLink && !links._tagInLink && code === 64) { // @
       let ls = i - 1;
       while (ls >= 0 && isEmailLocalCh(text.charCodeAt(ls)) && !isEscaped(text, ls)) ls--;
       ls++;
@@ -1079,6 +1149,29 @@ function inlineAtoms(text, links, inLink, rawBlock) {
     i++;
   }
   flushText();
+  // For each delimiter atom, record whether a backtick occurs later in
+  // this inline run (a code span, literal backtick text, or a backtick
+  // inside a later link's label/destination or image alt). Phase B uses
+  // it to decide whether a poisoned pair stays literal. This must run
+  // after the final flush, so a trailing literal backtick is visible.
+  {
+    const atomHasBt = (a) => {
+      if (a.t === 2) return true;
+      if (a.t === 0 || a.t === 1) return a.s.indexOf('`') !== -1;
+      if (a.t === 4) {
+        for (const k of a.kids) if (atomHasBt(k)) return true;
+        return false;
+      }
+      if (a.t === 5) return a.alt.indexOf('`') !== -1;
+      return false;
+    };
+    let seenBt = false;
+    for (let ai = atoms.length - 1; ai >= 0; ai--) {
+      const a = atoms[ai];
+      if (a.t === 6) a.btAfter = seenBt;
+      if (atomHasBt(a)) seenBt = true;
+    }
+  }
   return atoms;
 }
 
@@ -1163,6 +1256,13 @@ function resolveDelimiters(atoms) {
         // persists into nested resolution (the kids of a wrapper are
         // re-resolved), so mark it and never let it close there.
         if (barrierIdx >= 0) closer.blocked = true;
+        break;
+      }
+      // Poisoned pair (opener or closer created after a link with a
+      // poisoned label) with a backtick later in the inline run: the
+      // pair stays literal text (marked quirk).
+      if ((opener.pz || closer.pz) && closer.btAfter) {
+        closer.blocked = true;
         break;
       }
       let use;
@@ -2095,7 +2195,10 @@ function matchBlockquote(src, i) {
       if (inFence) {
         const fi = fenceLineInfo(stripped);
         if (fi && fi.ch === inFence.ch && fi.run >= inFence.run && fi.closerOk) inFence = null;
-      } else if (!paraOpen) {
+      } else {
+        // A fence line interrupts a paragraph, so it opens a fence even
+        // when a paragraph is open; otherwise a lazy line after the
+        // fence would wrongly be swallowed as fence content.
         const fi = fenceLineInfo(stripped);
         if (fi && !(fi.ch === 96 && stripped.indexOf('`', fi.end) !== -1)) {
           inFence = { ch: fi.ch, run: fi.run };
