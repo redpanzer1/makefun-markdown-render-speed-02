@@ -65,6 +65,10 @@ function labelHasResolvedRef(label, links) {
       if (depth === 0) {
         const inner = label.slice(i + 1, j - 1);
         if (!isImg && links.has(normLabel(inner))) return true;
+        // After a [x][y] pair, continue past BOTH groups: [y] is the
+        // first group's reference (for an image, its own reference),
+        // not a standalone shortcut.
+        let nextI = j;
         if (label.charCodeAt(j) === 91) {
           let depth2 = 1, k = j + 1;
           while (k < n && depth2 > 0) {
@@ -79,9 +83,10 @@ function labelHasResolvedRef(label, links) {
             const key = ref === '' ? inner : ref;
             // An image's [y] is the image's reference, not a link.
             if (!isImg && links.has(normLabel(key))) return true;
+            nextI = k;
           }
         }
-        i = j;
+        i = nextI;
         continue;
       }
     }
