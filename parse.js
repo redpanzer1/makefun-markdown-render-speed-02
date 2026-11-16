@@ -40,6 +40,111 @@ function decodeNumeric(isHex, digits) {
 // first (&#169; -> the character, invalid ones -> U+FFFD); named entities such
 // as &copy; pass through untouched; a bare & or an & that does not start a
 // valid entity becomes &amp;. < > " ' are always escaped.
+// True when a link label contains a nested reference that itself resolves
+// to a link: a shortcut [x], a collapsed [x][], or a full [x][y] whose
+// reference is defined. A link may not contain another link, so the outer
+// bracket pair must not become a link in that case. Groups that are an
+// image's label (![...] before a destination) are skipped: an image is
+// allowed inside a link.
+function labelHasResolvedRef(label, links) {
+  const n = label.length;
+  let i = 0;
+  while (i < n) {
+    const c = label.charCodeAt(i);
+    if (c === 92) { i += 2; continue; } // backslash escape
+    if (c === 91) { // [
+      const isImg = i > 0 && label.charCodeAt(i - 1) === 33;
+      let depth = 1, j = i + 1;
+      while (j < n && depth > 0) {
+        const d = label.charCodeAt(j);
+        if (d === 92) { j += 2; continue; }
+        if (d === 91) depth++;
+        else if (d === 93) depth--;
+        j++;
+      }
+      if (depth === 0) {
+        const inner = label.slice(i + 1, j - 1);
+        if (!isImg && links.has(normLabel(inner))) return true;
+        if (label.charCodeAt(j) === 91) {
+          let depth2 = 1, k = j + 1;
+          while (k < n && depth2 > 0) {
+            const d = label.charCodeAt(k);
+            if (d === 92) { k += 2; continue; }
+            if (d === 91) depth2++;
+            else if (d === 93) depth2--;
+            k++;
+          }
+          if (depth2 === 0) {
+            const ref = label.slice(j + 1, k - 1);
+            const key = ref === '' ? inner : ref;
+            if (links.has(normLabel(key))) return true;
+          }
+        }
+        i = j;
+        continue;
+      }
+    }
+    i++;
+  }
+  return false;
+}
+
+// Plain-text rendering of a link label, for image alt text: emphasis,
+// strong, strikethrough and links contribute only their text, code spans
+// contribute their (escaped) content, and a nested image contributes its
+// own alt text.
+function labelPlainText(label, links) {
+  let out = '';
+  const walkList = (head) => {
+    for (let p = head; p; p = p.next) {
+      if (p.t === 0 || p.t === 2) out += p.s;
+      else if (p.t === 1) out += escAll(p.s);
+      else if (p.t === 4 || p.t === 7 || p.t === 8 || p.t === 9) {
+        if (p.kids && p.kids.length > 0) walkList(resolveDelimiters(p.kids));
+      } else if (p.t === 5) out += p.alt;
+      else if (p.t === 6) {
+        for (let i = 0; i < p.len; i++) out += p.ch;
+      }
+    }
+  };
+  walkList(resolveDelimiters(inlineAtoms(label, links, false, false)));
+  return out;
+}
+
+// True when a label contains a nested inline link [x](...) that is not an
+// image (![x](...)). A link may not contain another link, but an image's
+// label may hold one (its text becomes part of the alt text).
+function labelHasInlineLink(label) {
+  const n = label.length;
+  let i = 0;
+  while (i < n) {
+    const c = label.charCodeAt(i);
+    if (c === 92) { i += 2; continue; } // backslash escape
+    if (c === 96) { // backtick: skip the code span
+      let j = i + 1;
+      while (j < n && label.charCodeAt(j) !== 96) j++;
+      i = j + 1;
+      continue;
+    }
+    if (c === 91) { // [
+      const isImg = i > 0 && label.charCodeAt(i - 1) === 33;
+      let depth = 1, j = i + 1;
+      while (j < n && depth > 0) {
+        const d = label.charCodeAt(j);
+        if (d === 92) { j += 2; continue; }
+        if (d === 91) depth++;
+        else if (d === 93) depth--;
+        j++;
+      }
+      if (depth === 0 && !isImg && label.charCodeAt(j) === 40) return true; // (
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
 function escText(s) {
   let out = '';
   let i = 0;
@@ -193,17 +298,13 @@ function isAsciiPunct(ch) {
 // Normalize a link reference label: unescape backslash escapes, collapse
 // runs of whitespace to one space, trim, lowercase.
 function normLabel(s) {
-  let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === '\\' && i + 1 < s.length && isAsciiPunct(s[i + 1])) {
-      out += s[i + 1];
-      i++;
-      continue;
-    }
-    out += c;
-  }
-  return out.replace(/\s+/g, ' ').trim().toLowerCase();
+  // Link labels are compared after collapsing whitespace and Unicode case
+  // folding. Backslash escapes are NOT removed: the raw label text is what
+  // is compared, so [foo\!] does not match a [foo!] definition.
+  // Case folding: capital sharp S and sharp S both fold to "ss", and the
+  // Greek final sigma folds to sigma.
+  return s.replace(/\s+/g, ' ').trim().toLowerCase()
+    .replace(/ß/g, 'ss').replace(/ẞ/g, 'ss').replace(/ς/g, 'σ');
 }
 
 // Find the index of the bracket that closes an opener at level 0, or -1.
@@ -282,17 +383,19 @@ function isPunctCh(ch) {
 
 const BT = String.fromCharCode(96);
 
-// A link label: nested [...] groups (one level deep) that may not be
-// followed at once by (, backslash escapes, `code` spans, or plain text.
-const LABEL_SRC = '(?:(?<=!)\\[(?:\\[(?:\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|[^\\[\\]\\\\])*\\]|(?<!\\!)\\[(?:\\[(?:\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|[^\\[\\]\\\\])*\\](?!\\()|\\\\.|' +
+// A link label: nested [...] groups (one level deep), backslash escapes,
+// `code` spans, or plain text. A nested group may be followed by ( —
+// whether that makes an inline link inside the label is decided when the
+// link is created (a link may not contain a link; an image's label may).
+const LABEL_SRC = '(?:\\[(?:\\[(?:\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|' +
   BT + '[^' + BT + ']*' + BT + '|[^\\[\\]\\\\' + BT + '])*?';;
-const HREF_SRC = '<(?:\\\\.|[^\\n<>\\\\])+>|(?!<)[^ \\t\\r\\n\\x00-\\x1f]*';
+const HREF_SRC = '<(?:\\\\.|[^\\n<>\\\\])*>|(?!<)[^ \\t\\r\\n\\x00-\\x1f]*';
 const TITLE_SRC = '"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|\\((?:\\\\.|[^()\\\\])*\\)';
 
 const RE_LINK = new RegExp('^!?\\[(' + LABEL_SRC + ')\\]\\([ \\t\\r\\n]*(' + HREF_SRC + ')(?:[ \\t\\r\\n]+(' + TITLE_SRC + '))?[ \\t\\r\\n]*\\)');
 const RE_REFLINK = new RegExp('^!?\\[(' + LABEL_SRC + ')\\]\\[(' + LABEL_SRC + ')\\]');
 const RE_NOLINK = /^!?\[((?:\[[^\[\]]*\]|\\[\[\]]|[^\[\]])*)\]/;
-const RE_AUTOLINK = /^<([^ >]+(@|:\/)[^ >]+)>/;
+const RE_AUTOLINK = /^<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^ <>]*|[^ <>]+@[^ <>]+)>/;
 const RE_TAG = new RegExp(
   '^<!--' + '[\\s\\S]*?' + '-->' + '|' +
   '^<[a-zA-Z][\\w-]*(?:\\s+[a-zA-Z_:][\\w.:-]*(?:\\s*=\\s*(?:"[^"]*"|\'[^\']*\'|[^\\s"\'=<>`]+))?)*\\s*/?>' + '|' +
@@ -538,9 +641,10 @@ function inlineAtoms(text, links, inLink, rawBlock) {
         flushText();
         const raw = am[1];
         const disp = escText(raw);
-        // A <mailto:...> autolink already carries its scheme; a bare
-        // <user@host> gets mailto: prepended.
-        const href = am[2] === '@' ? (/^mailto:/i.test(raw) ? disp : 'mailto:' + disp) : disp;
+        // A scheme autolink (<scheme:...>) keeps its text as the href; a
+        // bare <user@host> gets mailto: prepended.
+        const isScheme = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:/.test(raw);
+        const href = isScheme ? disp : 'mailto:' + disp;
         atoms.push({ t: 4, href, title: null, kids: [{ t: 0, s: disp }] });
         i += am[0].length;
         continue;
@@ -573,6 +677,11 @@ function inlineAtoms(text, links, inLink, rawBlock) {
           if (lp0 > -1) href0 = href0.substring(0, lp0);
           if (href0.charCodeAt(0) !== 60 && !parenBalanced(href0)) lm = null;
         }
+        // A label holding a reference that itself resolves is not a link.
+        if (lm && labelHasResolvedRef(lm[1], links)) lm = null;
+        // A link label holding an inline link is not a link (an image's
+        // label may hold one).
+        if (lm && rest.charCodeAt(0) !== 33 && labelHasInlineLink(lm[1])) lm = null;
         if (lm) {
           let href = lm[2];
           let title = lm[3] !== undefined ? lm[3] : null;
@@ -599,7 +708,7 @@ function inlineAtoms(text, links, inLink, rawBlock) {
           flushText();
           const isImg = rest.charCodeAt(0) === 33;
           if (isImg) {
-            atoms.push({ t: 5, href, title, alt: escText(lm[1]) });
+            atoms.push({ t: 5, href, title, alt: labelPlainText(lm[1], links) });
           } else {
             const kids = inlineAtoms(lm[1], links, true, inRaw);
             atoms.push({ t: 4, href, title, kids });
@@ -609,29 +718,41 @@ function inlineAtoms(text, links, inLink, rawBlock) {
         }
         const rm = RE_REFLINK.exec(rest);
         if (rm) {
-          const label = rm[2] !== '' ? rm[2] : rm[1];
-          const def = links.get(normLabel(label));
-          if (def) {
-            flushText();
-            const isImg = rest.charCodeAt(0) === 33;
-            if (isImg) {
-              atoms.push({ t: 5, href: def.href, title: def.title, alt: escText(rm[1]) });
-            } else {
-              const kids = inlineAtoms(rm[1], links, true, inRaw);
-              atoms.push({ t: 4, href: def.href, title: def.title, kids });
+          // A [x][y] that matched syntactically is resolved here or not at
+          // all: [x] never falls back to being a shortcut link, and a label
+          // holding a reference that itself resolves, or (for a link) an
+          // inline link, is never a link.
+          const badLabel = labelHasResolvedRef(rm[1], links) ||
+            (rest.charCodeAt(0) !== 33 && labelHasInlineLink(rm[1]));
+          if (!badLabel) {
+            const label = rm[2] !== '' ? rm[2] : rm[1];
+            const def = links.get(normLabel(label));
+            if (def) {
+              flushText();
+              const isImg = rest.charCodeAt(0) === 33;
+              if (isImg) {
+                atoms.push({ t: 5, href: def.href, title: def.title, alt: labelPlainText(rm[1], links) });
+              } else {
+                const kids = inlineAtoms(rm[1], links, true, inRaw);
+                atoms.push({ t: 4, href: def.href, title: def.title, kids });
+              }
+              i += rm[0].length;
+              continue;
             }
-            i += rm[0].length;
-            continue;
           }
+          textBuf += ch;
+          i++;
+          continue;
         }
         const nm = RE_NOLINK.exec(rest);
-        if (nm) {
+        if (nm && !labelHasResolvedRef(nm[1], links) &&
+          !(rest.charCodeAt(0) !== 33 && labelHasInlineLink(nm[1]))) {
           const def = links.get(normLabel(nm[1]));
           if (def) {
             flushText();
             const isImg = rest.charCodeAt(0) === 33;
             if (isImg) {
-              atoms.push({ t: 5, href: def.href, title: def.title, alt: escText(nm[1]) });
+              atoms.push({ t: 5, href: def.href, title: def.title, alt: labelPlainText(nm[1], links) });
             } else {
               const kids = inlineAtoms(nm[1], links, true, inRaw);
               atoms.push({ t: 4, href: def.href, title: def.title, kids });
@@ -1148,6 +1269,7 @@ function matchDef(src, i, links) {
       l += 2;
       continue;
     }
+    if (c === 91) return null; // unescaped '[' inside the label: not a def
     if (c === 93) break; // ]
     if (c === 10) {
       let r = l + 1;
@@ -1261,6 +1383,7 @@ function matchDef(src, i, links) {
     }
   }
   const key = normLabel(label);
+  if (key.length === 0) return null; // a label that folds to empty is not a def
   if (!links.has(key)) {
     links.set(key, { href, title });
   }
