@@ -77,7 +77,8 @@ function labelHasResolvedRef(label, links) {
           if (depth2 === 0) {
             const ref = label.slice(j + 1, k - 1);
             const key = ref === '' ? inner : ref;
-            if (links.has(normLabel(key))) return true;
+            // An image's [y] is the image's reference, not a link.
+            if (!isImg && links.has(normLabel(key))) return true;
           }
         }
         i = j;
@@ -2120,7 +2121,7 @@ function matchList(src, i, links) {
   const outItems = [];
   for (let a = 0; a < items.length; a++) {
     const it = items[a];
-    const text = it.lines.join('\n');
+    let text = it.lines.join('\n');
     // A blank line inside the item separating two blocks makes the list
     // loose. This catches blank lines a nested block swallowed (a
     // trailing blank line of a nested list item still separates the
@@ -2129,6 +2130,7 @@ function matchList(src, i, links) {
     // lives inside a nested block, and one inside a fenced code block
     // is fence content, not a separator.
     let hasBlankThenContent = false;
+    let lastInFence = false;
     {
       let inFence = false;
       let fenceCh = 0;
@@ -2146,6 +2148,7 @@ function matchList(src, i, links) {
         }
         fenceStates.push(inFence);
       }
+      lastInFence = fenceStates.length > 0 ? fenceStates[fenceStates.length - 1] : false;
       for (let k = 0; k < it.lines.length; k++) {
         if (it.lines[k] === '' && !fenceStates[k]) {
           let hasBefore = false, hasAfter = false;
@@ -2162,6 +2165,10 @@ function matchList(src, i, links) {
       }
     }
     if (hasBlankThenContent) loose = true;
+    // The last item of a list loses its trailing spaces/tabs (a top-level
+    // paragraph keeps them). Not inside an unclosed fenced code block,
+    // where trailing spaces are code content.
+    if (a === items.length - 1 && !lastInFence) text = text.replace(/[ \t]+$/, '');
     // Byte offsets of lazy continuation lines in the item text.
     let lazySet = null;
     if (it.lazy && it.lazy.some(Boolean)) {
