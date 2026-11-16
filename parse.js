@@ -889,7 +889,8 @@ function inlineAtoms(text, links, inLink, rawBlock) {
     }
 
     // GFM extended autolinks: www. / scheme:// (checked at their first char).
-    if (code === 119 || code === 104 || code === 102 || code === 72 || code === 70) {
+    // Never inside a link's text.
+    if (!inLink && (code === 119 || code === 104 || code === 102 || code === 72 || code === 70)) {
       const hit = matchSchemeUrl(text, i);
       if (hit) {
         flushText();
@@ -903,8 +904,8 @@ function inlineAtoms(text, links, inLink, rawBlock) {
     }
     // An email address: the local part is found by scanning back over the
     // raw text, and it may span trailing text atoms and dead delimiter
-    // runs (e.g. the intraword _ in a.b-c_d@a.b).
-    if (code === 64) { // @
+    // runs (e.g. the intraword _ in a.b-c_d@a.b). Never inside a link.
+    if (!inLink && code === 64) { // @
       let ls = i - 1;
       while (ls >= 0 && isEmailLocalCh(text.charCodeAt(ls)) && !isEscaped(text, ls)) ls--;
       ls++;
@@ -1646,7 +1647,7 @@ function tableCells(row, count) {
 }
 
 // Does the line at j start a block that interrupts a paragraph?
-function interruptAt(src, j) {
+function interruptAt(src, j, inList) {
   const le = lineEnd(src, j);
   if (isBlankLine(src, j, le)) return true;
   const li = leadInfo(src, j, le);
@@ -1673,9 +1674,10 @@ function interruptAt(src, j) {
   // Blockquote
   if (c0 === 62) return true;
   // List (bullet, or ordered starting with exactly 1) — but an empty
-  // item does not interrupt a paragraph.
+  // item does not interrupt a paragraph. Inside a list item, an
+  // ordered list with any start number interrupts.
   const lm = matchListMarker(src, j);
-  if (lm && !lm.empty && (!lm.ordered || lm.bullet === '1.' || lm.bullet === '1)')) return true;
+  if (lm && !lm.empty && (!lm.ordered || inList || lm.bullet === '1.' || lm.bullet === '1)')) return true;
   // Html block, types 1-6 only
   const hb = htmlBlockStart(src, j, le);
   if (hb && hb.kind <= 6) return true;
@@ -1685,7 +1687,7 @@ function interruptAt(src, j) {
 }
 
 // Scan paragraph lines from i. Returns { text, next }.
-function scanParagraph(src, i, noSetext, lazySet) {
+function scanParagraph(src, i, noSetext, lazySet, inList) {
   const lines = [];
   let j = i;
   const n = src.length;
@@ -1700,7 +1702,7 @@ function scanParagraph(src, i, noSetext, lazySet) {
     // never interrupts the paragraph, even if it looks like a block start.
     // (A blank line reaching here is the last line at EOF: paragraph
     // content, not an interruption.)
-    if (lines.length > 0 && !isBlankLine(src, j, le) && !(lazySet && lazySet.has(j)) && (interruptAt(src, j) || (setextDepth(src, j) > 0 && !(noSetext && noSetext.has(j))))) break;
+    if (lines.length > 0 && !isBlankLine(src, j, le) && !(lazySet && lazySet.has(j)) && (interruptAt(src, j, inList) || (setextDepth(src, j) > 0 && !(noSetext && noSetext.has(j))))) break;
     lines.push(src.slice(j, le));
     j = le + 1;
   }
@@ -2170,7 +2172,7 @@ function matchList(src, i, links) {
         off += it.lines[k].length + 1;
       }
     }
-    const toks = lexBlocks(text, links, true, undefined, lazySet);
+    const toks = lexBlocks(text, links, true, undefined, lazySet, true);
     // Loose if a space token sits between two non-space tokens.
     for (let b = 1; b < toks.length - 1; b++) {
       if (toks[b].t === 'space') { loose = true; break; }
@@ -2184,7 +2186,7 @@ function matchList(src, i, links) {
 // Block lexer: turns source text into a token list.
 // ---------------------------------------------------------------------------
 
-function lexBlocks(src, links, isInner, noSetext, lazySet) {
+function lexBlocks(src, links, isInner, noSetext, lazySet, inList) {
   const toks = [];
   const n = src.length;
   let i = 0;
@@ -2234,7 +2236,7 @@ function lexBlocks(src, links, isInner, noSetext, lazySet) {
       if (rest0.charCodeAt(0) === 62) {
         const bq = matchBlockquote(src, i);
         if (bq) {
-          toks.push({ t: 'blockquote', tokens: lexBlocks(bq.text, links, true, bq.noSetext, bq.lazySet) });
+          toks.push({ t: 'blockquote', tokens: lexBlocks(bq.text, links, true, bq.noSetext, bq.lazySet, false) });
           i = bq.next;
           continue;
         }
@@ -2276,7 +2278,7 @@ function lexBlocks(src, links, isInner, noSetext, lazySet) {
       }
     }
     // Paragraph, or setext heading.
-    const para = scanParagraph(src, i, noSetext, lazySet);
+    const para = scanParagraph(src, i, noSetext, lazySet, inList);
     const sd = (noSetext && noSetext.has(para.next)) ? 0 : setextDepth(src, para.next);
     if (sd > 0) {
       // The heading text drops the first line's leading and the last
