@@ -429,14 +429,9 @@ function trimUrl(u) {
   let prev;
   do {
     prev = u;
-    while (u.length > 0) {
-      const c = u.charCodeAt(u.length - 1);
-      if (c === 63 || c === 33 || c === 46 || c === 44 || c === 58 || c === 59 ||
-        c === 42 || c === 95 || c === 126) {
-        u = u.slice(0, -1);
-      } else break;
-    }
-    // Entity-like tail (&word; or &#...;) at the very end is not part of it.
+    // Entity-like tail (&word; or &#...;) at the very end is not part of
+    // it. This runs before the punctuation trim, so the trailing ';' of
+    // an entity is not eaten first.
     if (u.endsWith(';')) {
       const amp = u.lastIndexOf('&', u.length - 2);
       if (amp !== -1) {
@@ -446,6 +441,13 @@ function trimUrl(u) {
           continue;
         }
       }
+    }
+    while (u.length > 0) {
+      const c = u.charCodeAt(u.length - 1);
+      if (c === 63 || c === 33 || c === 46 || c === 44 || c === 58 || c === 59 ||
+        c === 42 || c === 95 || c === 126) {
+        u = u.slice(0, -1);
+      } else break;
     }
     if (u.endsWith(')')) {
       let open = 0, close = 0;
@@ -483,6 +485,73 @@ function isEmailLocalCh(c) {
     c === 35 || c === 36 || c === 38 || c === 39 || c === 42 || c === 47 ||
     c === 61 || c === 63 || c === 94 || c === 96 || c === 123 || c === 124 ||
     c === 125 || c === 126;
+}
+
+// Is the character at `pos` escaped by an odd run of backslashes?
+function isEscaped(text, pos) {
+  let n = 0, j = pos - 1;
+  while (j >= 0 && text.charCodeAt(j) === 92) { n++; j--; }
+  return n % 2 === 1;
+}
+
+// Collect up to `len` characters from the end of the processed content
+// (textBuf + trailing text atoms and dead delimiter runs), without
+// changing anything. Returns the collected string, or null when the
+// content runs into an atom that is not plain text.
+function trailingText(atoms, textBuf, len) {
+  let out = '';
+  let need = len;
+  if (textBuf.length > 0) {
+    const take = Math.min(need, textBuf.length);
+    out = textBuf.slice(textBuf.length - take) + out;
+    need -= take;
+  }
+  let idx = atoms.length - 1;
+  while (need > 0 && idx >= 0) {
+    const a = atoms[idx];
+    if (a.t === 0) {
+      const take = Math.min(need, a.s.length);
+      out = a.s.slice(a.s.length - take) + out;
+      need -= take;
+    } else if (a.t === 6 && !a.open && !a.close) {
+      const take = Math.min(need, a.len);
+      out = a.ch.repeat(take) + out;
+      need -= take;
+    } else {
+      return null;
+    }
+    idx--;
+  }
+  return need === 0 ? out : null;
+}
+
+// Remove `len` characters from the end of the processed content (the
+// caller has already verified trailingText matches). Mutates atoms and
+// returns the new textBuf.
+function removeTrailing(atoms, textBuf, len) {
+  let need = len;
+  if (textBuf.length > 0) {
+    const take = Math.min(need, textBuf.length);
+    textBuf = textBuf.slice(0, textBuf.length - take);
+    need -= take;
+  }
+  while (need > 0 && atoms.length > 0) {
+    const a = atoms[atoms.length - 1];
+    if (a.t === 0) {
+      const take = Math.min(need, a.s.length);
+      if (take === a.s.length) atoms.pop();
+      else a.s = a.s.slice(0, a.s.length - take);
+      need -= take;
+    } else if (a.t === 6 && !a.open && !a.close) {
+      const take = Math.min(need, a.len);
+      if (take === a.len) atoms.pop();
+      else a.len -= take;
+      need -= take;
+    } else {
+      break;
+    }
+  }
+  return textBuf;
 }
 
 // Match a GFM scheme/www autolink starting at `i` in `text`.
@@ -784,36 +853,55 @@ function inlineAtoms(text, links, inLink, rawBlock) {
       }
       // fall through to plain text
     }
-    // An email address: when we reach @, look back over the local part in
-    // the pending text and check the domain ahead.
+    // An email address: the local part is found by scanning back over the
+    // raw text, and it may span trailing text atoms and dead delimiter
+    // runs (e.g. the intraword _ in a.b-c_d@a.b).
     if (code === 64) { // @
-      let s = textBuf.length - 1;
-      while (s >= 0 && isEmailLocalCh(textBuf.charCodeAt(s))) s--;
-      const localStart = s + 1;
-      if (localStart < textBuf.length) {
+      let ls = i - 1;
+      while (ls >= 0 && isEmailLocalCh(text.charCodeAt(ls)) && !isEscaped(text, ls)) ls--;
+      ls++;
+      const localRaw = text.slice(ls, i);
+      if (localRaw.length > 0) {
         const after = text.slice(i + 1);
         const dm = /^[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)+/.exec(after);
         if (dm) {
-          const local = textBuf.slice(localStart);
-          let head = textBuf.slice(0, localStart);
-          // A mailto: prefix immediately before the local part (at a
-          // word boundary) belongs to the autolink.
-          let prefix = '';
-          if (/mailto:$/i.test(head)) {
-            const beforeMailto = head.slice(0, -7);
-            if (beforeMailto.length === 0 || !isWordCh(beforeMailto[beforeMailto.length - 1])) {
-              prefix = head.slice(-7);
-              head = beforeMailto;
+          // A domain followed at once by - or _ is not an email at all
+          // (the label would continue and end invalidly).
+          const afterDomain = text[i + 1 + dm[0].length];
+          if (afterDomain !== '-' && afterDomain !== '_') {
+            // A mailto: or xmpp: prefix immediately before the local
+            // part (at a word boundary) belongs to the autolink. An
+            // xmpp: link also takes one path segment after the domain.
+            let prefix = '';
+            let claimLen = localRaw.length;
+            let path = '';
+            if (ls >= 7 && text.slice(ls - 7, ls).toLowerCase() === 'mailto:') {
+              const beforeMailto = ls - 8 >= 0 ? text[ls - 8] : undefined;
+              if (beforeMailto === undefined || !isWordCh(beforeMailto)) {
+                prefix = text.slice(ls - 7, ls);
+                claimLen += 7;
+              }
+            } else if (ls >= 5 && text.slice(ls - 5, ls).toLowerCase() === 'xmpp:') {
+              const beforeXmpp = ls - 6 >= 0 ? text[ls - 6] : undefined;
+              if (beforeXmpp === undefined || !isWordCh(beforeXmpp)) {
+                prefix = text.slice(ls - 5, ls);
+                claimLen += 5;
+                const pm = /^\/[^\s<>\/]*/.exec(text.slice(i + 1 + dm[0].length));
+                if (pm) path = pm[0];
+              }
+            }
+            const got = trailingText(atoms, textBuf, claimLen);
+            if (got !== null && got === prefix + localRaw) {
+              textBuf = removeTrailing(atoms, textBuf, claimLen);
+              flushText();
+              const url = prefix + localRaw + '@' + dm[0] + path;
+              const disp = escText(url);
+              const href = prefix ? disp : 'mailto:' + disp;
+              atoms.push({ t: 4, href, title: null, kids: [{ t: 0, s: disp }] });
+              i += 1 + dm[0].length + path.length;
+              continue;
             }
           }
-          textBuf = head;
-          flushText();
-          const url = prefix + local + '@' + dm[0];
-          const disp = escText(url);
-          const href = prefix ? disp : 'mailto:' + disp;
-          atoms.push({ t: 4, href, title: null, kids: [{ t: 0, s: disp }] });
-          i += 1 + dm[0].length;
-          continue;
         }
       }
       textBuf += ch;
@@ -868,8 +956,8 @@ function resolveDelimiters(atoms) {
         if (!cand || cand.t !== 6 || cand.len === 0 || cand.ch !== closer.ch || !cand.open) continue;
         // Skip a delimiter already swallowed into a wrapper (orphaned).
         if (cand.prev === null && cand.next === null && head !== cand) continue;
-        if (cand.ch === '~') { // ~ requires equal lengths
-          if (cand.len !== closer.len) continue;
+        if (cand.ch === '~') { // ~ requires equal lengths, and only 1 or 2
+          if (cand.len !== closer.len || cand.len > 2) continue;
         } else {
           // Rule of three: when either delimiter can both open and close,
           // a sum divisible by 3 is forbidden unless both lengths are
