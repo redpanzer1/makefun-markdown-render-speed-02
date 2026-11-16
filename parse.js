@@ -2295,22 +2295,37 @@ function matchList(src, i, links) {
       // loosen this item)? True when the next non-blank line is a list
       // marker and the previous non-blank line is that list's marker
       // or a continuation of one of its items (indented past the
-      // marker that opened it).
+      // marker that opened it). Also true when the previous line is a
+      // nested marker and the next line is an indented continuation of
+      // the same nested item (a paragraph after a nested bullet list).
       const blankInsideNested = (k) => {
         let nextIdx = -1;
         for (let m = k + 1; m < it.lines.length; m++) if (it.lines[m] !== '') { nextIdx = m; break; }
-        if (nextIdx === -1 || !isMarker(it.lines[nextIdx])) return false;
+        if (nextIdx === -1) return false;
         let prevIdx = -1;
         for (let m = k - 1; m >= 0; m--) if (it.lines[m] !== '') { prevIdx = m; break; }
         if (prevIdx === -1) return false;
-        if (isMarker(it.lines[prevIdx])) return true;
+        const nextLine = it.lines[nextIdx];
         const prevLine = it.lines[prevIdx];
+        const nextIndent = /^[ ]*/.exec(nextLine)[0].length;
         const prevIndent = /^[ ]*/.exec(prevLine)[0].length;
+        // Previous line is a nested marker and the next line is an
+        // indented continuation of that same item.
+        if (isMarker(prevLine) && nextIndent > 0 && !isMarker(nextLine)) {
+          const markerIndent = prevIndent;
+          if (nextIndent > markerIndent) return true;
+        }
+        if (!isMarker(nextLine)) return false;
+        if (isMarker(prevLine)) return true;
+        // Previous line is a continuation: find the marker that owns
+        // it (a marker at a strictly smaller indent; a marker at the
+        // same indent does not own it, so keep scanning past it).
         for (let m = prevIdx - 1; m >= 0; m--) {
           if (it.lines[m] === '') continue;
           if (isMarker(it.lines[m])) {
             const markerIndent = /^[ ]*/.exec(it.lines[m])[0].length;
-            return prevIndent > markerIndent;
+            if (prevIndent > markerIndent) return true;
+            continue;
           }
           if (!/^[ \t]/.test(it.lines[m])) return false;
         }
