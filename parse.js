@@ -174,7 +174,32 @@ function closerInTag(text, openIdx, closeIdx) {
           }
           j++;
         }
-        if (j >= closeIdx) return true; // no > before the ]: ] is inside the tag
+        if (j >= closeIdx) {
+          // No > before the ]: the ] is inside the tag only when it
+          // sits inside a quoted attribute value (quote still open),
+          // or when the < starts a URI-scheme autolink whose > comes
+          // after the ]. Otherwise the < is literal text, not a tag,
+          // and the ] closes the label normally.
+          if (quote !== 0) return true;
+          // Scheme autolink? <scheme: ... > with no whitespace.
+          let s = i + 1;
+          if (s < closeIdx && /[A-Za-z]/.test(text[s])) {
+            s++;
+            let sl = 0;
+            while (s < closeIdx && sl < 31 && /[A-Za-z0-9+.-]/.test(text[s])) { s++; sl++; }
+            if (s < closeIdx && text.charCodeAt(s) === 58 && sl >= 1) {
+              let t = s + 1;
+              while (t < text.length) {
+                const c = text.charCodeAt(t);
+                if (c === 62) { if (t > closeIdx) return true; break; }
+                if (c === 32 || c === 9 || c === 10) break;
+                t++;
+              }
+            }
+          }
+          i++;
+          continue;
+        }
         i = j + 1;
         continue;
       }
