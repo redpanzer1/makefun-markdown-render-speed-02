@@ -158,6 +158,9 @@ function labelHasInlineLink(label) {
 // run of length 1 AND (a literal run of length >= 2 or a code span).
 // Backslash escapes do not count as backticks.
 function labelPoisoned(label) {
+  // Fast path: no backtick at all means no runs, hence not poisoned.
+  // (Most link labels have no backtick.)
+  if (label.indexOf('`') === -1) return false;
   const runs = [];
   for (let i = 0; i < label.length;) {
     const c = label.charCodeAt(i);
@@ -196,6 +199,61 @@ function labelPoisoned(label) {
     else if (r >= 2) hasGe2 = true;
   }
   return has1 && (hasGe2 || hasCodespan);
+}
+
+// Does an atom (or anything inside it: a link's label, an image alt)
+// contain a backtick? Used for the poison rules in phase A and B.
+function atomHasBt(a) {
+  if (a.t === 2) return true;
+  if (a.t === 0 || a.t === 1) return a.s.indexOf('`') !== -1;
+  if (a.t === 4) {
+    for (const k of a.kids) if (atomHasBt(k)) return true;
+    return false;
+  }
+  if (a.t === 5) return a.alt.indexOf('`') !== -1;
+  return false;
+}
+
+// Backtick runs in raw inline text, in order (maximal runs of unescaped
+// backticks; a backslash escape does not start a run).
+function rawBtRuns(text) {
+  const runs = [];
+  for (let i = 0; i < text.length;) {
+    const c = text.charCodeAt(i);
+    if (c === 92) { i += 2; continue; } // backslash escape
+    if (c === 96) {
+      let j = i;
+      while (j < text.length && text.charCodeAt(j) === 96) j++;
+      runs.push(j - i);
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return runs;
+}
+
+// Does the greedy code-span pairing of these backtick runs (a run pairs
+// with the next run of the same length; the runs between are swallowed
+// as span content) leave a literal (unpaired) run of length 1?
+function hasLiteralRun1(runs) {
+  const used = new Array(runs.length).fill(false);
+  for (let a = 0; a < runs.length; a++) {
+    if (used[a]) continue;
+    let found = -1;
+    for (let b = a + 1; b < runs.length; b++) {
+      if (!used[b] && runs[b] === runs[a]) { found = b; break; }
+    }
+    if (found !== -1) {
+      used[a] = true;
+      used[found] = true;
+      for (let c = a + 1; c < found; c++) used[c] = true;
+    }
+  }
+  for (let a = 0; a < runs.length; a++) {
+    if (!used[a] && runs[a] === 1) return true;
+  }
+  return false;
 }
 
 // Is the label's closing ] (at closeIdx) inside an HTML tag? Scans the
@@ -722,6 +780,10 @@ function inlineAtoms(text, links, inLink, rawBlock, isLabel) {
   // cleared again in this run. While set, delimiter runs are marked
   // poisoned (resolved in phase B).
   let poisoned = false;
+  // True once a poisoned delimiter run has been created in this run.
+  // The btAfter pass and the literal-run-1 computation are only needed
+  // then, so unpoisoned runs (the vast majority) skip them entirely.
+  let anyPz = false;
   // Ranges [start, end) of failed inline-link labels in this text:
   // a [...](...) that looked like a link but was rejected suppresses
   // emphasis inside its label (marked treats the whole attempt as
@@ -863,6 +925,7 @@ function inlineAtoms(text, links, inLink, rawBlock, isLabel) {
       }
       flushText();
       atoms.push({ t: 6, ch, len: run, open: canOpen, close: canClose, pz: poisoned });
+      if (poisoned) anyPz = true;
       i = j;
       continue;
     }
@@ -913,9 +976,12 @@ function inlineAtoms(text, links, inLink, rawBlock, isLabel) {
         // An inline <a ...> tag (exactly "<a " + space) suppresses
         // later GFM autolinks document-wide; a literal </a> clears it.
         // Tags inside link labels / alt text do not touch this flag.
+        // (charCodeAt checks, not regexes: tags are frequent.)
         if (!isLabel) {
-          if (/^<a /i.test(tag)) links._tagInLink = true;
-          else if (/^<\/a>/i.test(tag)) links._tagInLink = false;
+          const c0 = tag.charCodeAt(0), c1 = tag.charCodeAt(1);
+          if (c0 === 60 && (c1 === 97 || c1 === 65) && tag.charCodeAt(2) === 32) links._tagInLink = true;
+          else if (c0 === 60 && c1 === 47 && (tag.charCodeAt(2) === 97 || tag.charCodeAt(2) === 65) &&
+            tag.charCodeAt(3) === 62) links._tagInLink = false;
         }
         if (!inRaw && /^<(pre|code|kbd|script|style)[\s/>]/i.test(tag)) inRaw = true;
         else if (inRaw && /^<\/(pre|code|kbd|script|style)\s*>/i.test(tag)) inRaw = false;
@@ -1154,23 +1220,19 @@ function inlineAtoms(text, links, inLink, rawBlock, isLabel) {
   // inside a later link's label/destination or image alt). Phase B uses
   // it to decide whether a poisoned pair stays literal. This must run
   // after the final flush, so a trailing literal backtick is visible.
-  {
-    const atomHasBt = (a) => {
-      if (a.t === 2) return true;
-      if (a.t === 0 || a.t === 1) return a.s.indexOf('`') !== -1;
-      if (a.t === 4) {
-        for (const k of a.kids) if (atomHasBt(k)) return true;
-        return false;
-      }
-      if (a.t === 5) return a.alt.indexOf('`') !== -1;
-      return false;
-    };
+  // Only needed when a poisoned delimiter exists (anyPz); otherwise
+  // btAfter is never read.
+  if (anyPz) {
     let seenBt = false;
     for (let ai = atoms.length - 1; ai >= 0; ai--) {
       const a = atoms[ai];
       if (a.t === 6) a.btAfter = seenBt;
       if (atomHasBt(a)) seenBt = true;
     }
+    // Record whether the greedy code-span pairing of the run's backtick
+    // runs (raw text, labels included) leaves a literal run of length 1.
+    // Phase B uses it for the rescue rule.
+    atoms._hasLiteral1 = hasLiteralRun1(rawBtRuns(text));
   }
   return atoms;
 }
@@ -1178,6 +1240,11 @@ function inlineAtoms(text, links, inLink, rawBlock, isLabel) {
 // Phase B: resolve delimiter runs into em / strong / del nodes.
 // Operates on a doubly linked list built from the atom array.
 function resolveDelimiters(atoms) {
+  // Whether the greedy code-span pairing of this inline run's backtick
+  // runs leaves a literal run of length 1 (set by phase A, only when
+  // the run was poisoned; false otherwise). The kids of a wrapper
+  // inherit it, so nested resolution sees the same value.
+  const hasLiteral1 = atoms._hasLiteral1 === true;
   // Build the linked list.
   let head = null, tail = null;
   for (const a of atoms) {
@@ -1260,10 +1327,19 @@ function resolveDelimiters(atoms) {
       }
       // Poisoned pair (opener or closer created after a link with a
       // poisoned label) with a backtick later in the inline run: the
-      // pair stays literal text (marked quirk).
+      // pair stays literal text (marked quirk) — unless a backtick
+      // inside the span rescues it: when the span contains a backtick
+      // and the run's backtick-run pairing leaves no literal run of
+      // length 1, the pair still forms.
       if ((opener.pz || closer.pz) && closer.btAfter) {
-        closer.blocked = true;
-        break;
+        let insideHasBt = false;
+        for (let p = opener.next; p && p !== closer; p = p.next) {
+          if (atomHasBt(p)) { insideHasBt = true; break; }
+        }
+        if (!(insideHasBt && !hasLiteral1)) {
+          closer.blocked = true;
+          break;
+        }
       }
       let use;
       if (opener.ch === '~') use = opener.len; // equal by the check above
@@ -1283,6 +1359,7 @@ function resolveDelimiters(atoms) {
       // Gather the kids between opener and closer.
       const kids = [];
       for (let p = opener.next; p && p !== closer; p = p.next) kids.push(p);
+      kids._hasLiteral1 = atoms._hasLiteral1;
       const wrap = { t: kind, kids, prev: null, next: null };
       lastWrap = wrap;
       // Remove the kids from the list (they live inside the wrapper now).
