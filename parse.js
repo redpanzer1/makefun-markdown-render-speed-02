@@ -516,12 +516,14 @@ function trimUrl(u) {
       } else break;
     }
     if (u.endsWith(')')) {
-      let open = 0, close = 0;
-      for (let i = 0; i < u.length; i++) {
-        if (u[i] === '(') open++;
-        else if (u[i] === ')') close++;
+      // The trailing ) is kept when some ( before it is unmatched;
+      // an unmatched ) earlier in the url does not condemn it.
+      let depth = 0;
+      for (let i = 0; i < u.length - 1; i++) {
+        if (u[i] === '(') depth++;
+        else if (u[i] === ')') { if (depth > 0) depth--; }
       }
-      if (close > open) {
+      if (depth === 0) {
         u = u.slice(0, -1);
         continue;
       }
