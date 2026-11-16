@@ -1374,7 +1374,17 @@ function stripFenceIndent(src, from, to, indent) {
   let j = from;
   while (j < to) {
     const le = lineEnd(src, j);
-    out += stripCols(src, j, Math.min(le, to), indent);
+    // The fence indent is stripped character by character: each leading
+    // space or tab counts as one, and a tab cut through is removed
+    // whole (never replaced by spaces).
+    let k = j;
+    let left = indent;
+    while (k < le && left > 0) {
+      const c = src.charCodeAt(k);
+      if (c === 32 || c === 9) { k++; left--; }
+      else break;
+    }
+    out += src.slice(k, Math.min(le, to));
     if (le < to) out += '\n';
     j = le + 1;
   }
