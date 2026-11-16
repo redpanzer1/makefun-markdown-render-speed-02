@@ -2068,17 +2068,44 @@ function matchList(src, i, links) {
   for (let a = 0; a < items.length; a++) {
     const it = items[a];
     const text = it.lines.join('\n');
-    // A blank line inside the item separating two blocks makes the
-    // list loose (even when the following block is a link definition,
-    // which itself emits no token). A blank line at the very start of
-    // an (empty-marker) item does not.
+    // A blank line inside the item separating two blocks makes the list
+    // loose. This catches blank lines a nested block swallowed (a
+    // trailing blank line of a nested list item still separates the
+    // nested list from the next block of this item). Only a blank line
+    // at the item's own level counts: one followed by an indented line
+    // lives inside a nested block, and one inside a fenced code block
+    // is fence content, not a separator.
     let hasBlankThenContent = false;
-    for (let k = 0; k < it.lines.length; k++) {
-      if (it.lines[k] === '') {
-        let hasBefore = false, hasAfter = false;
-        for (let m = 0; m < k; m++) if (it.lines[m] !== '') { hasBefore = true; break; }
-        for (let m = k + 1; m < it.lines.length; m++) if (it.lines[m] !== '') { hasAfter = true; break; }
-        if (hasBefore && hasAfter) { hasBlankThenContent = true; break; }
+    {
+      let inFence = false;
+      let fenceCh = 0;
+      let fenceLen = 0;
+      const fenceStates = [];
+      for (let k = 0; k < it.lines.length; k++) {
+        const ln = it.lines[k];
+        const m = /^(?: {0,3})(`{3,}|~{3,})/.exec(ln);
+        if (m && !inFence) {
+          inFence = true;
+          fenceCh = m[1].charCodeAt(0);
+          fenceLen = m[1].length;
+        } else if (m && inFence && m[1].charCodeAt(0) === fenceCh && m[1].length >= fenceLen && (fenceCh !== 96 || ln.slice(m[0].length).indexOf('`') === -1)) {
+          inFence = false;
+        }
+        fenceStates.push(inFence);
+      }
+      for (let k = 0; k < it.lines.length; k++) {
+        if (it.lines[k] === '' && !fenceStates[k]) {
+          let hasBefore = false, hasAfter = false;
+          for (let m = 0; m < k; m++) if (it.lines[m] !== '') { hasBefore = true; break; }
+          for (let m = k + 1; m < it.lines.length; m++) {
+            if (it.lines[m] !== '') {
+              const firstCh = it.lines[m].charCodeAt(0);
+              if (firstCh !== 32 && firstCh !== 9) hasAfter = true;
+              break;
+            }
+          }
+          if (hasBefore && hasAfter) { hasBlankThenContent = true; break; }
+        }
       }
     }
     if (hasBlankThenContent) loose = true;
@@ -2180,9 +2207,11 @@ function lexBlocks(src, links, isInner, noSetext, lazySet) {
         continue;
       }
     }
-    // Link reference definition (consumed silently).
+    // Link reference definition: consumed, but kept as a token so a
+    // blank line next to it still counts for loose/tight lists.
     const def = matchDef(src, i, links);
     if (def) {
+      toks.push({ t: 'def' });
       i = def.next;
       continue;
     }
@@ -2220,6 +2249,7 @@ function renderBlocks(toks, links, out) {
   for (const tok of toks) {
     switch (tok.t) {
       case 'space': break;
+      case 'def': break;
       case 'hr': out.push('<hr>\n'); break;
       case 'heading':
         out.push('<h' + tok.depth + '>' + parseInline(tok.text, links) + '</h' + tok.depth + '>\n');
