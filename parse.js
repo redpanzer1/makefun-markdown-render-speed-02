@@ -1764,11 +1764,22 @@ function matchTable(src, i) {
   const n = src.length;
   while (j < n) {
     const le3 = lineEnd(src, j);
-    if (isBlankLine(src, j, le3)) break;
+    // A whitespace-only line ends the table — except a line that, after
+    // stripping up to 3 leading spaces, is exactly one tab: that is a
+    // table row of empty cells.
+    let tabRow = false;
+    if (isBlankLine(src, j, le3)) {
+      let k = j;
+      let spaces = 0;
+      while (k < le3 && spaces < 3 && src.charCodeAt(k) === 32) { k++; spaces++; }
+      if (k + 1 === le3 && src.charCodeAt(k) === 9) tabRow = true;
+      else break;
+    }
     // A line that starts another block (blockquote, heading, fence,
     // list, html block) ends the table; a plain line, with or without
-    // pipes, is a row (a missing cell is empty).
-    if (interruptAt(src, j)) break;
+    // pipes, is a row (a missing cell is empty). A tab row is not a
+    // block start.
+    if (!tabRow && interruptAt(src, j)) break;
     const rowLine = src.slice(j, le3);
     rows.push(tableCells(rowLine, count).map((text, idx) => ({ text, align: aligns[idx] })));
     j = le3 + 1;
