@@ -2262,6 +2262,31 @@ function matchList(src, i, links) {
       }
       lastInFence = fenceStates.length > 0 ? fenceStates[fenceStates.length - 1] : false;
       const isMarker = (ln) => /^(?: {0,3})(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(ln);
+      // Is the blank line at k inside a nested list (so it must not
+      // loosen this item)? True when the next non-blank line is a list
+      // marker and the previous non-blank line is that list's marker
+      // or a continuation of one of its items (indented past the
+      // marker that opened it).
+      const blankInsideNested = (k) => {
+        let nextIdx = -1;
+        for (let m = k + 1; m < it.lines.length; m++) if (it.lines[m] !== '') { nextIdx = m; break; }
+        if (nextIdx === -1 || !isMarker(it.lines[nextIdx])) return false;
+        let prevIdx = -1;
+        for (let m = k - 1; m >= 0; m--) if (it.lines[m] !== '') { prevIdx = m; break; }
+        if (prevIdx === -1) return false;
+        if (isMarker(it.lines[prevIdx])) return true;
+        const prevLine = it.lines[prevIdx];
+        const prevIndent = /^[ ]*/.exec(prevLine)[0].length;
+        for (let m = prevIdx - 1; m >= 0; m--) {
+          if (it.lines[m] === '') continue;
+          if (isMarker(it.lines[m])) {
+            const markerIndent = /^[ ]*/.exec(it.lines[m])[0].length;
+            return prevIndent > markerIndent;
+          }
+          if (!/^[ \t]/.test(it.lines[m])) return false;
+        }
+        return false;
+      };
       for (let k = 0; k < it.lines.length; k++) {
         if (it.lines[k] === '' && !fenceStates[k]) {
           let hasBefore = false, hasAfter = false;
@@ -2277,6 +2302,7 @@ function matchList(src, i, links) {
           // A blank line between two list markers is inside the nested
           // list they belong to, not a separator at this item's level.
           if (hasBefore && hasAfter && prevLine !== null && nextLine !== null && isMarker(prevLine) && isMarker(nextLine)) continue;
+          if (blankInsideNested(k)) continue;
           if (hasBefore && hasAfter) { hasBlankThenContent = true; break; }
         }
       }
