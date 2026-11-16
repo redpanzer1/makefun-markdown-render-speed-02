@@ -1050,6 +1050,7 @@ function resolveDelimiters(atoms) {
     if (!closer || closer.t !== 6 || closer.len === 0 || !closer.close || closer.blocked) continue;
     // Find the matching opener: nearest preceding delimiter of the same char
     // that can open, subject to the odd/even rule for * and _.
+    let lastWrap = null;
     while (closer.len > 0 && closer.close) {
       let opener = null;
       // The latest barrier for this char before this closer (if any).
@@ -1114,6 +1115,7 @@ function resolveDelimiters(atoms) {
       const kids = [];
       for (let p = opener.next; p && p !== closer; p = p.next) kids.push(p);
       const wrap = { t: kind, kids, prev: null, next: null };
+      lastWrap = wrap;
       // Remove the kids from the list (they live inside the wrapper now).
       for (const k of kids) removeNode(k);
       // Leftover delimiter text stays as plain delimiter atoms.
@@ -1125,6 +1127,28 @@ function resolveDelimiters(atoms) {
       if (closer.len === 0) {
         removeNode(closer);
         break;
+      }
+    }
+    // A closer left over after closing a STRONG belongs inside that
+    // strong when the strong holds an intraword em/strong (its closer
+    // glued to a following word char, e.g. *b*c in **a *b*c***): the
+    // trailing delimiter is then part of the strong, not after it.
+    // (An em wrapper keeps its leftover outside.)
+    if (closer.len > 0 && closer.t === 6 && lastWrap && lastWrap.t === 8) {
+      const kids = lastWrap.kids;
+      let intraword = false;
+      for (let k = 0; k + 1 < kids.length; k++) {
+        if ((kids[k].t === 7 || kids[k].t === 8) && (kids[k + 1].t === 0 || kids[k + 1].t === 1)) {
+          const s = kids[k + 1].s;
+          if (s.length > 0 && isWordCh(s[0])) { intraword = true; break; }
+        }
+      }
+      if (intraword) {
+        const prev = closer.prev;
+        if (prev === lastWrap) {
+          lastWrap.kids.push({ t: 0, s: closer.ch.repeat(closer.len) });
+          removeNode(closer);
+        }
       }
     }
   }
