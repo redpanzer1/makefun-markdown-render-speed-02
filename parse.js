@@ -2213,9 +2213,9 @@ function matchList(src, i, links) {
     // loose. This catches blank lines a nested block swallowed (a
     // trailing blank line of a nested list item still separates the
     // nested list from the next block of this item). Only a blank line
-    // at the item's own level counts: one followed by an indented line
-    // lives inside a nested block, and one inside a fenced code block
-    // is fence content, not a separator.
+    // at the item's own level counts: one inside a fenced code block
+    // is fence content, and one between two markers of the same nested
+    // list lives inside that list, not at this level.
     let hasBlankThenContent = false;
     let lastInFence = false;
     {
@@ -2236,17 +2236,22 @@ function matchList(src, i, links) {
         fenceStates.push(inFence);
       }
       lastInFence = fenceStates.length > 0 ? fenceStates[fenceStates.length - 1] : false;
+      const isMarker = (ln) => /^(?: {0,3})(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/.test(ln);
       for (let k = 0; k < it.lines.length; k++) {
         if (it.lines[k] === '' && !fenceStates[k]) {
           let hasBefore = false, hasAfter = false;
-          for (let m = 0; m < k; m++) if (it.lines[m] !== '') { hasBefore = true; break; }
+          let prevLine = null, nextLine = null;
+          for (let m = 0; m < k; m++) if (it.lines[m] !== '') { hasBefore = true; prevLine = it.lines[m]; }
           for (let m = k + 1; m < it.lines.length; m++) {
             if (it.lines[m] !== '') {
               const firstCh = it.lines[m].charCodeAt(0);
-              if (firstCh !== 32 && firstCh !== 9) hasAfter = true;
+              if (firstCh !== 32 && firstCh !== 9) { hasAfter = true; nextLine = it.lines[m]; }
               break;
             }
           }
+          // A blank line between two list markers is inside the nested
+          // list they belong to, not a separator at this item's level.
+          if (hasBefore && hasAfter && prevLine !== null && nextLine !== null && isMarker(prevLine) && isMarker(nextLine)) continue;
           if (hasBefore && hasAfter) { hasBlankThenContent = true; break; }
         }
       }
