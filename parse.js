@@ -145,6 +145,39 @@ function labelHasInlineLink(label) {
   return false;
 }
 
+// Is the label's closing ] (at closeIdx) inside an HTML tag? Scans the
+// label text for <...> spans, respecting quoted attribute values. A ]
+// inside a tag's attribute value does not close the label, so a match
+// ending there is not a link at all.
+function closerInTag(text, openIdx, closeIdx) {
+  let i = openIdx;
+  while (i < closeIdx) {
+    if (text.charCodeAt(i) === 60) { // <
+      const nx = text[i + 1];
+      if (nx && (/[A-Za-z]/.test(nx) || nx === '/' || nx === '!' || nx === '?')) {
+        let j = i + 1;
+        let quote = 0;
+        while (j < closeIdx) {
+          const c = text.charCodeAt(j);
+          if (quote !== 0) {
+            if (c === quote) quote = 0;
+          } else if (c === 34 || c === 39) {
+            quote = c;
+          } else if (c === 62) {
+            break; // > closes the tag
+          }
+          j++;
+        }
+        if (j >= closeIdx) return true; // no > before the ]: ] is inside the tag
+        i = j + 1;
+        continue;
+      }
+    }
+    i++;
+  }
+  return false;
+}
+
 function escText(s) {
   let out = '';
   let i = 0;
@@ -383,11 +416,13 @@ function isPunctCh(ch) {
 
 const BT = String.fromCharCode(96);
 
-// A link label: nested [...] groups (one level deep), backslash escapes,
-// `code` spans, or plain text. A nested group may be followed by ( —
-// whether that makes an inline link inside the label is decided when the
-// link is created (a link may not contain a link; an image's label may).
-const LABEL_SRC = '(?:\\[(?:\\[(?:\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|' +
+// A link label: nested [...] groups (one level deep), HTML tags (a ]
+// inside a tag's attribute value does not close the label), backslash
+// escapes, `code` spans, or plain text. A nested group may be followed
+// by ( — whether that makes an inline link inside the label is decided
+// when the link is created (a link may not contain a link; an image's
+// label may).
+const LABEL_SRC = '(?:\\[(?:\\[(?:\\\\.|[^\\[\\]\\\\])*\\]|\\\\.|[^\\[\\]\\\\])*\\]|<\\/?[A-Za-z][^>]*>|\\\\.|' +
   BT + '[^' + BT + ']*' + BT + '|[^\\[\\]\\\\' + BT + '])*?';;
 const HREF_SRC = '<(?:\\\\.|[^\\n<>\\\\])*>|(?!<)[^ \\t\\r\\n\\x00-\\x1f]*';
 const TITLE_SRC = '"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|\\((?:\\\\.|[^()\\\\])*\\)';
@@ -743,6 +778,11 @@ function inlineAtoms(text, links, inLink, rawBlock) {
       if (!inLink || code === 33) {
         const rest = text.slice(i);
         let lm = RE_LINK.exec(rest);
+        // A ] inside an HTML tag does not close the label: not a link.
+        if (lm) {
+          const openLen = rest.charCodeAt(0) === 33 ? 2 : 1;
+          if (closerInTag(rest, openLen, openLen + lm[1].length)) lm = null;
+        }
         // A bare destination with unbalanced parentheses is not a link.
         if (lm) {
           let href0 = lm[2];
@@ -791,6 +831,14 @@ function inlineAtoms(text, links, inLink, rawBlock) {
         }
         const rm = RE_REFLINK.exec(rest);
         if (rm) {
+          const openLen = rest.charCodeAt(0) === 33 ? 2 : 1;
+          if (closerInTag(rest, openLen, openLen + rm[1].length)) {
+            // The first ] is inside an HTML tag: the whole [x][y] is
+            // literal, and [x] does not fall back to a shortcut.
+            textBuf += ch;
+            i++;
+            continue;
+          }
           // A [x][y] that matched syntactically is resolved here or not at
           // all: [x] never falls back to being a shortcut link, and a label
           // holding a reference that itself resolves, or (for a link) an
@@ -818,7 +866,7 @@ function inlineAtoms(text, links, inLink, rawBlock) {
           continue;
         }
         const nm = RE_NOLINK.exec(rest);
-        if (nm && !labelHasResolvedRef(nm[1], links) &&
+        if (nm && !closerInTag(rest, rest.charCodeAt(0) === 33 ? 2 : 1, (rest.charCodeAt(0) === 33 ? 2 : 1) + nm[1].length) && !labelHasResolvedRef(nm[1], links) &&
           !(rest.charCodeAt(0) !== 33 && labelHasInlineLink(nm[1]))) {
           const def = links.get(normLabel(nm[1]));
           if (def) {
