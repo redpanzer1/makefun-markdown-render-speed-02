@@ -2161,7 +2161,12 @@ function matchList(src, i, links) {
         // Lazy continuation of a paragraph (the content indent is
         // stripped, as for blockquote lazy lines).
         if (paraOpen && lazyOk(line2)) {
-          itemLines.push(stripIndentCols(line2, cIndent));
+          // A lazy continuation has less indent than the content
+          // indent: strip whole 4-column code-indents from its
+          // leading whitespace (a 1-3 space indent is kept verbatim).
+          const li2b = leadInfo(src, j, le2);
+          const strip = Math.floor(li2b.col / 4) * 4;
+          itemLines.push(strip > 0 ? stripIndentCols(line2, strip) : line2);
           itemLazy.push(true);
           itemEndedBlank = false;
           itemHasContent = true;
