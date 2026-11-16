@@ -1489,13 +1489,25 @@ function matchDef(src, i, links) {
 // ---------------------------------------------------------------------------
 
 // Is the line at j a table header (contains |) followed by a delimiter row?
+// Number of cells in a table row line (split on |, dropping a leading
+// empty cell when the row starts with a pipe and a trailing one when it
+// ends with one). Used to check the header against the delimiter row.
+function rowCellCount(line) {
+  let cells = splitTableRow(line);
+  if (line.replace(/^[ \t]+/, '').startsWith('|') && cells.length > 0 && cells[0].trim() === '') cells = cells.slice(1);
+  if (line.replace(/[ \t]+$/, '').endsWith('|') && cells.length > 0 && cells[cells.length - 1].trim() === '') cells = cells.slice(0, -1);
+  return cells.length;
+}
+
 function isTableStart(src, j) {
   const le = lineEnd(src, j);
   if (src.slice(j, le).indexOf('|') === -1) return false;
   const nl = le + 1;
   if (nl >= src.length) return false;
   const le2 = lineEnd(src, nl);
-  return parseDelimRow(src.slice(nl, le2)) !== null;
+  const aligns = parseDelimRow(src.slice(nl, le2));
+  if (aligns === null) return false;
+  return rowCellCount(src.slice(j, le)) === aligns.length;
 }
 
 // Parse a table delimiter row into alignments, or null when it is not one.
@@ -1675,6 +1687,7 @@ function matchTable(src, i) {
   const le2 = lineEnd(src, nl);
   const aligns = parseDelimRow(src.slice(nl, le2));
   if (!aligns) return null;
+  if (rowCellCount(headerLine) !== aligns.length) return null;
   const count = aligns.length;
   const head = tableCells(headerLine, count).map((text, idx) => ({ text, align: aligns[idx] }));
   const rows = [];
@@ -1683,8 +1696,11 @@ function matchTable(src, i) {
   while (j < n) {
     const le3 = lineEnd(src, j);
     if (isBlankLine(src, j, le3)) break;
+    // A line that starts another block (blockquote, heading, fence,
+    // list, html block) ends the table; a plain line, with or without
+    // pipes, is a row (a missing cell is empty).
+    if (interruptAt(src, j)) break;
     const rowLine = src.slice(j, le3);
-    if (rowLine.indexOf('|') === -1) break;
     rows.push(tableCells(rowLine, count).map((text, idx) => ({ text, align: aligns[idx] })));
     j = le3 + 1;
   }
